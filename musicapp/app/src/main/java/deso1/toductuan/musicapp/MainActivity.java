@@ -1,7 +1,6 @@
 package deso1.toductuan.musicapp;
 
 import android.Manifest;
-import android.annotation.SuppressLint;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.media.MediaPlayer;
@@ -16,6 +15,8 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -30,19 +31,14 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private static final int REQUEST_PERMISSION = 101;
     private static final int LEVEL_PAUSE = 0;
     private static final int LEVEL_PLAY = 1;
-    private static final MediaPlayer player = new MediaPlayer();
-    private static final int STATE_IDLE = 1;
-    private static final int STATE_PLAYING = 2;
-    private static final int STATE_PAUSED = 3;
 
-    private final ArrayList<SongEntity> listSong = new ArrayList<>();
+    private MediaPlayer player;
+    private ArrayList<SongEntity> listSong = new ArrayList<>();
     private TextView tvName, tvAlbum, tvTime;
     private SeekBar seekBar;
     private ImageView ivPlay;
     private int index = 0;
     private SongEntity songEntity;
-    private Thread thread;
-    private int state = STATE_IDLE;
     private String totalTime;
     private RecyclerView rvSongs;
     private MusicAdapter adapter;
@@ -67,65 +63,140 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         rvSongs = findViewById(R.id.rv_song);
         rvSongs.setLayoutManager(new LinearLayoutManager(this));
 
-        // Khởi tạo adapter trước khi load danh sách bài hát
         adapter = new MusicAdapter(listSong, this);
         rvSongs.setAdapter(adapter);
 
-        // Kiểm tra và yêu cầu quyền truy cập dữ liệu media
-        if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, REQUEST_PERMISSION);
+        checkPermissionAndLoadSongs();
+    }
+
+    private void checkPermissionAndLoadSongs() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, REQUEST_PERMISSION);
         } else {
-            loadingListSongOffline();
+            loadSongList();
         }
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_PERMISSION && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            loadingListSongOffline();
-        } else {
-            Toast.makeText(this, R.string.txt_alert, Toast.LENGTH_SHORT).show();
-            finish();
+        if (requestCode == REQUEST_PERMISSION) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                loadSongList();
+            } else {
+                Toast.makeText(this, "Ứng dụng cần quyền truy cập bộ nhớ để phát nhạc", Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
-    private void loadingListSongOffline() {
-        Cursor c = getContentResolver().query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, null, null, null, null);
+    private void loadSongList() {
+        Cursor c = getContentResolver().query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, null, null, null, MediaStore.Audio.Media.TITLE + " ASC");
         if (c != null && c.moveToFirst()) {
             listSong.clear();
             do {
                 String name = getColumnString(c, MediaStore.Audio.Media.TITLE);
                 String path = getColumnString(c, MediaStore.Audio.Media.DATA);
-                String album = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-                        ? getColumnString(c, MediaStore.Audio.Media.ALBUM_ARTIST)
-                        : "N/A";
+                String album = getColumnString(c, MediaStore.Audio.Media.ALBUM);
 
-                listSong.add(new SongEntity(name, path, album));
+                if (path != null && path.endsWith(".mp3")) {
+                    listSong.add(new SongEntity(name, path, album));
+                }
             } while (c.moveToNext());
             c.close();
         }
 
-        // Cập nhật dữ liệu mới cho adapter
         adapter.notifyDataSetChanged();
 
         if (listSong.isEmpty()) {
             Toast.makeText(this, "Không tìm thấy bài hát nào!", Toast.LENGTH_SHORT).show();
         } else {
-            play();
-            playPause();
+            playSong(listSong.get(0));
         }
     }
 
     private String getColumnString(Cursor cursor, String columnName) {
         int columnIndex = cursor.getColumnIndex(columnName);
-        return columnIndex != -1 ? cursor.getString(columnIndex) : "N/A";
+        return columnIndex != -1 ? cursor.getString(columnIndex) : "Unknown";
     }
 
-    public void playSong(SongEntity songEntity) {
-        index = listSong.indexOf(songEntity);
-        this.songEntity = songEntity;
-        play();
+    public void playSong(SongEntity song) {
+        if (listSong.isEmpty() || song == null) return;
+
+        index = listSong.indexOf(song);
+        songEntity = song;
+
+        tvName.setText(songEntity.getName());
+        tvAlbum.setText(songEntity.getAlbum());
+
+        if (player != null) {
+            player.stop();
+            player.release();
+        }
+
+        player = new MediaPlayer();
+        try {
+            player.setDataSource(songEntity.getPath());
+            player.prepareAsync();
+            player.setOnPreparedListener(mp -> {
+                mp.start();
+                ivPlay.setImageLevel(LEVEL_PLAY);
+                totalTime = formatTime(mp.getDuration());
+                seekBar.setMax(mp.getDuration());
+                updateSeekBar();
+            });
+
+            player.setOnCompletionListener(mp -> nextSong());
+        } catch (Exception e) {
+            e.printStackTrace();
+            Toast.makeText(this, "Lỗi phát nhạc!", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void updateSeekBar() {
+        new Thread(() -> {
+            while (player != null && player.isPlaying()) {
+                try {
+                    Thread.sleep(500);
+                    runOnUiThread(() -> {
+                        if (player != null) {
+                            seekBar.setProgress(player.getCurrentPosition());
+                            tvTime.setText(String.format("%s / %s", formatTime(player.getCurrentPosition()), totalTime));
+                        }
+                    });
+                } catch (Exception e) {
+                    return;
+                }
+            }
+        }).start();
+    }
+
+    private String formatTime(int time) {
+        return new SimpleDateFormat("mm:ss").format(new Date(time));
+    }
+
+    public void playPause() {
+        if (player == null) return;
+
+        if (player.isPlaying()) {
+            player.pause();
+            ivPlay.setImageLevel(LEVEL_PAUSE);
+        } else {
+            player.start();
+            ivPlay.setImageLevel(LEVEL_PLAY);
+            updateSeekBar();
+        }
+    }
+
+    private void nextSong() {
+        if (listSong.isEmpty()) return;
+        index = (index + 1) % listSong.size();
+        playSong(listSong.get(index));
+    }
+
+    private void previousSong() {
+        if (listSong.isEmpty()) return;
+        index = (index - 1 + listSong.size()) % listSong.size();
+        playSong(listSong.get(index));
     }
 
     @Override
@@ -133,108 +204,31 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         if (v.getId() == R.id.iv_play) {
             playPause();
         } else if (v.getId() == R.id.iv_next) {
-            next();
+            nextSong();
         } else if (v.getId() == R.id.iv_back) {
-            back();
+            previousSong();
         }
-    }
-
-    private void back() {
-        index = (index == 0) ? listSong.size() - 1 : index - 1;
-        play();
-    }
-
-    private void next() {
-        index = (index >= listSong.size() - 1) ? 0 : index + 1;
-        play();
-    }
-
-    private void playPause() {
-        if (state == STATE_PLAYING && player.isPlaying()) {
-            player.pause();
-            ivPlay.setImageLevel(LEVEL_PAUSE);
-            state = STATE_PAUSED;
-        } else if (state == STATE_PAUSED) {
-            player.start();
-            state = STATE_PLAYING;
-            ivPlay.setImageLevel(LEVEL_PLAY);
-        } else {
-            play();
-        }
-    }
-
-    private void play() {
-        if (listSong.isEmpty()) return;
-
-        songEntity = listSong.get(index);
-        tvName.setText(songEntity.getName());
-        tvAlbum.setText(songEntity.getAlbum());
-        player.reset();
-
-        try {
-            player.setDataSource(songEntity.getPath());
-            player.prepare();
-            player.start();
-            ivPlay.setImageLevel(LEVEL_PLAY);
-            state = STATE_PLAYING;
-            totalTime = getTime(player.getDuration());
-            seekBar.setMax(player.getDuration());
-
-            if (thread == null) {
-                startLooping();
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    private void startLooping() {
-        thread = new Thread(() -> {
-            while (true) {
-                try {
-                    Thread.sleep(200);
-                } catch (Exception e) {
-                    return;
-                }
-                runOnUiThread(this::updateTime);
-            }
-        });
-        thread.start();
-    }
-
-    private void updateTime() {
-        if (state == STATE_PLAYING || state == STATE_PAUSED) {
-            int time = player.getCurrentPosition();
-            tvTime.setText(String.format("%s/%s", getTime(time), totalTime));
-            seekBar.setProgress(time);
-        }
-    }
-
-    @SuppressLint("SimpleDateFormat")
-    private String getTime(int time) {
-        return new SimpleDateFormat("mm:ss").format(new Date(time));
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (thread != null) {
-            thread.interrupt();
+        if (player != null) {
+            player.release();
+            player = null;
         }
     }
 
     @Override
     public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-    }
-
-    @Override
-    public void onStartTrackingTouch(SeekBar seekBar) {
-    }
-
-    @Override
-    public void onStopTrackingTouch(SeekBar seekBar) {
-        if (state == STATE_PLAYING || state == STATE_PAUSED) {
-            player.seekTo(seekBar.getProgress());
+        if (fromUser && player != null) {
+            player.seekTo(progress);
         }
     }
+
+    @Override
+    public void onStartTrackingTouch(SeekBar seekBar) {}
+
+    @Override
+    public void onStopTrackingTouch(SeekBar seekBar) {}
 }
